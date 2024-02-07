@@ -4,7 +4,7 @@
 // Author        : Juntao Guo
 // Email         : 1554895045@qq.com
 // Created On    : 2024/02/07 09:58
-// Last Modified : 2024/02/07 10:58
+// Last Modified : 2024/02/07 17:46
 // File Name     : ddr4_controller.v
 // Description   :
 //         
@@ -17,7 +17,7 @@
 // -FHDR----------------------------------------------------------------------------
 
 
-module ddr4_op #(parameter
+module ddr4_controller #(parameter
     DFI_CHIP_DELECT_CHIP = 1,
     DFI_DATA_ENABLE_WIDTH = 16,
     DFI_DATA_WIDTH = 128,
@@ -25,14 +25,8 @@ module ddr4_op #(parameter
     BA_WIDTH = 2,
     BG_WIDTH = 2
 )(
-    output  [31:0]                          t_phy_wrlat,
-    output  [31:0]                          t_phy_wrdata,
-    output  [31:0]                          t_rddata_en,
-    output  [31:0]                          t_phy_rdlat,
-    
     // clock and reset
     input                                   dfi_clk,
-    input                                   dfi_phy_clk,
     input                                   reset_n,
 
     // control interface
@@ -122,11 +116,11 @@ module ddr4_op #(parameter
     input   [DFI_DATA_WIDTH/8-1:0]          dfi_rddata_dbi_w3,
 
     // update interface
-    output                                  dfi_ctrlupd_req,    
-    output                                  dfi_phyupd_ack,    
+    output                                  dfi_ctrlupd_req,     
     input                                   dfi_ctrlupd_ack,
     input                                   dfi_phyupd_req,
-    input                                   dfi_phyupd_type,
+    output                                  dfi_phyupd_ack, 
+    input   [1:0]                           dfi_phyupd_type,
 
     // status interface
     output                                  dfi_dram_clk_disable,
@@ -153,8 +147,136 @@ module ddr4_op #(parameter
     input                                   dfi_error_info                
 );
 
+localparam ININ_SM_IDLE = 0;
+localparam ININ_SM_SHANKHAND = 1;
+localparam ININ_SM_WAIT = 2;
+
+// DDR4 command
+// CMD = {CS_n, ACT_n, RAS_n_A16, CAS_n_AA15, WE_n_A14}
+localparam NOP = 5'b0_1111;
+localparam PREA = 5'b0_1010; // a10=1
 
 
+reg     [4:0]   init_cnt;
+reg             dfi_init_start_pre_reg;
+reg     [2:0]   init_sm; // state machine
+reg     [2:0]   init_sm_reg; // state machine
+reg             dfi_reset_n_p0_pre_reg;
+
+// lp
+assign dfi_lp_ctrl_req = 1'b0;
+assign dfi_lp_data_req = 1'b0;
+assign dfi_lp_wakeup = 1'b0;
+
+// status
+assign dfi_dram_clk_disable = 1'b0;
+assign dfi_freq_ratio = 2'b0;
+
+
+always @(posedge dfi_clk or negedge reset_n)
+    if(~reset_n)
+        init_cnt <= 1'b0;
+    else if(~init_cnt[4])
+        init_cnt <= init_cnt + 1'b1;
+
+always @(posedge clk or negedge reset_n)
+    if(~reset_n)
+        init_sm_reg <= INIT_SM_IDLE;
+    else
+        init_sm_reg <= init_sm;
+
+always @(*) 
+case(init_sm_reg)
+    INIT_SM_IDLE:
+        if(init_cnt[4])
+            init_sm <= INIT_SM_SHAKEHAND;
+        else
+            init_sm <= INIT_SM_IDLE;
+    INIT_SM_SHAKEHAND:
+        if(dfi_init_start && dfi_init_complete)
+            init_sm <= INIT_SM_WAIT;
+        else
+            init_sm <= INIT_SM_SHAKEHAND;
+    INIT_SM_WAIT:
+        init_sm <= INIT_SM_WAIT;
+    default:
+        init_sm <= INIT_SM_IDLE;
+endcase          
+    
+always @(*) 
+case(init_sm_reg)
+    INIT_SM_SHAKEHAND:
+        dfi_init_start_pre_reg <= 1'b1;
+    default:
+        dfi_init_start_pre_reg <= 1'b0;    
+endcase
+
+always @(*) 
+case(init_sm_reg)
+    INIT_SM_IDLE:
+        dfi_reset_n_p0_pre_reg <= |init_cnt[4:2];
+    INIT_SM_SHAKEHAND:
+        dfi_reset_n_p0_pre_reg <= 1'b1;
+    INIT_SM_WAIT:
+        dfi_reset_n_p0_pre_reg <= 1'b1;
+    default:
+        dfi_reset_n_p0_pre_reg <= 1'b0;
+endcase
+
+assign dfi_reset_n_p0 = dfi_reset_n_p0_pre_reg;
+assign dfi_reset_n_p1 = 1'b0;
+assign dfi_reset_n_p2 = 1'b0;
+assign dfi_reset_n_p3 = 1'b0;         
+
+assign dfi_init_start = dfi_init_start_pre_reg;
+
+assign dfi_frequency = 5'b0;
+assign dfi_dram_clk_disable = 1'b0;
+assign dfi_ctrlupd_req = 1'b0;
+assign dfi_phyupd_ack = 1'b0;
+assign {dfi_cke_p3, dfi_cke_p2, dfi_cke_p1, dfi_cke_p0} = 4'hf;
+assign {dfi_cs_p3, dfi_cs_p2, dfi_cs_p1, dfi_cs_p0} = 4'h0; 
+assign {dfi_act_n_p3, dfi_act_n_p2, dfi_act_n_p1, dfi_act_n_p0} = 4'hf; 
+assign {dfi_ras_n_p3, dfi_ras_n_p2, dfi_ras_n_p1, dfi_ras_n_p0} = 4'hf; 
+assign {dfi_cas_n_p3, dfi_cas_n_p2, dfi_cas_n_p1, dfi_cas_n_p0} = 4'hf; 
+assign {dfi_we_n_p3, dfi_we_n_p2, dfi_we_n_p1, dfi_we_n_p0} = 4'hf;
+
+assign dfi_address_p0 = 'b0;
+assign dfi_address_p1 = 'b0;
+assign dfi_address_p2 = 'b0;
+assign dfi_address_p3 = 'b0;
+assign dfi_bg_p0 = 'b0; 
+assign dfi_bg_p1 = 'b0; 
+assign dfi_bg_p2 = 'b0; 
+assign dfi_bg_p3 = 'b0; 
+assign dfi_bank_p0 = 'b0; 
+assign dfi_bank_p1 = 'b0; 
+assign dfi_bank_p2 = 'b0; 
+assign dfi_bank_p3 = 'b0;
+assign dfi_wrdata_en_p0 = 'b0; 
+assign dfi_wrdata_en_p1 = 'b0; 
+assign dfi_wrdata_en_p2 = 'b0; 
+assign dfi_wrdata_en_p3 = 'b0;
+assign dfi_wrdata_p0 = 'b0; 
+assign dfi_wrdata_p1 = 'b0; 
+assign dfi_wrdata_p2 = 'b0; 
+assign dfi_wrdata_p3 = 'b0;
+assign dfi_wrdata_cs_p0 = 'b0; 
+assign dfi_wrdata_cs_p1 = 'b0; 
+assign dfi_wrdata_cs_p2 = 'b0; 
+assign dfi_wrdata_cs_p3 = 'b0; 
+assign dfi_wrdata_mask_p0 = 'b0; 
+assign dfi_wrdata_mask_p1 = 'b0; 
+assign dfi_wrdata_mask_p2 = 'b0; 
+assign dfi_wrdata_mask_p3 = 'b0;
+assign dfi_rddata_en_p0 = 'b0;
+assign dfi_rddata_en_p1 = 'b0;
+assign dfi_rddata_en_p2 = 'b0;
+assign dfi_rddata_en_p3 = 'b0;
+assign dfi_rddata_cs_p0 = 'b0;
+assign dfi_rddata_cs_p1 = 'b0;
+assign dfi_rddata_cs_p2 = 'b0;
+assign dfi_rddata_cs_p3 = 'b0;
 
 endmodule
 
